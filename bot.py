@@ -4,11 +4,6 @@ from config import TELEGRAM_TOKEN
 from moviepy import VideoFileClip
 from utils.validate_url import validate_url
 from utils.logger import logger, request_context
-from utils.downloader_youtube import (
-    download_youtube_video,
-    download_youtube_audio,
-    DownloadError
-)
 from utils.constants import (
     HELP_MESSAGE,
     UNKNOWN_COMMAND_MESSAGE,
@@ -27,13 +22,17 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from utils.downloader_base import DownloadError
+from utils.downloader_youtube import YouTubeDownloader
+from utils.downloader_twitter import TwitterDownloader
+
+youtube_downloader = YouTubeDownloader()
+twitter_downloader = TwitterDownloader()
 
 async def process_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE, command_type: str):
     with request_context() as request_id:
         user_id = update.effective_user.id
         username = update.effective_user.username or "No username"
-
-        logger.info(f"Received {command_type} command from user {username} (ID: {user_id})")
 
         if not context.args or len(context.args) != 1:
             logger.warning(f"Missing URL in {command_type} command from user {user_id}")
@@ -41,103 +40,76 @@ async def process_media_command(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         url = context.args[0]
-        logger.info(f"Processing URL: {url}")
+        logger.info(f"Received {command_type} request: for {url} from user {username} (ID: {user_id})")
 
         # Validate URL and get platform
         is_valid, error_message, platform = validate_url(url)
         if not is_valid:
-            logger.warning(f"Invalid URL provided by user {user_id}: {url}")
+            logger.warning(f"Invalid URL: {url}")
             await update.message.reply_text(error_message)
             return
 
         # Сообщение пользователю о начале обработки
-        logger.info(f"URL validation passed. Platform: {platform}")
         await update.message.reply_text(PROCESSING_START_MESSAGE)
 
         try:
             if platform == 'YouTube':
-                try:
-                    if command_type == "video":
-                        filepath = await download_youtube_video(url, request_id=request_id)
-
-                        # Проверяем, что файл существует
-                        if not os.path.exists(filepath):
-                            await update.message.reply_text(TECHNICAL_ERROR_MESSAGE)
-                            return
-
-                        # Проверяем, что файл имеет правильный размер
-                        file_size = os.path.getsize(filepath)
-                        if file_size > 45_000_000:  # 45MB
-                            await update.message.reply_text(FILE_TOO_LARGE_MESSAGE)
-                            return
-
-                        # Отправляем видео
-                        with redirect_stdout(None), redirect_stderr(None):  # Скрываем вывод ffmpeg
-                            with VideoFileClip(filepath) as clip:
-                                width = clip.w
-                                height = clip.h
-                                await update.message.reply_video(
-                                    video=open(filepath, 'rb'),
-                                    width=width,
-                                    height=height,
-                                    supports_streaming=True,
-                                    filename=os.path.basename(filepath)
-                                )
-                                logger.info(f"Video {url} sent successfully to {username} (ID: {user_id})")
-
-                    elif command_type == "audio":
-                        filepath, title = await download_youtube_audio(url, request_id=request_id)
-
-                        # Проверяем, что файл существует
-                        if not os.path.exists(filepath):
-                            await update.message.reply_text(TECHNICAL_ERROR_MESSAGE)
-                            return
-
-                        # Проверяем, что файл имеет правильный размер
-                        file_size = os.path.getsize(filepath)
-                        if file_size > 45_000_000:  # 45MB
-                            await update.message.reply_text(FILE_TOO_LARGE_MESSAGE)
-                            return
-
-                        # Отправляем аудио файл
-                        await update.message.reply_audio(
-                            audio=open(filepath, 'rb'),
-                            title=title,
-                            filename=os.path.basename(filepath),
-                            performer="from YouTube via Saver"
-                        )
-                        logger.info(f"Audio {url} sent successfully to {username} (ID: {user_id})")
-
-                except DownloadError as e:
-                    logger.error(f"Download error for {url}: {str(e)}")
-                    error_message = str(e)
-
-                    if "too large" in error_message.lower():
-                        await update.message.reply_text(FILE_TOO_LARGE_MESSAGE)
-                    else:
-                        await update.message.reply_text(DOWNLOAD_ERROR_MESSAGE)
-                    logger.error(f"Download error: {e}")
-
-                except Exception as e:
-                    logger.error(f"Error processing video: {e}")
-                    await update.message.reply_text(TECHNICAL_ERROR_MESSAGE)
-
-                finally:
-                    if 'filepath' in locals() and os.path.exists(filepath):
-                        try:
-                            os.remove(filepath)
-                            logger.debug(f"Temporary file removed: {filepath}")
-                        except Exception as e:
-                            logger.error(f"Error removing temporary file {filepath}: {e}")
+                downloader = youtube_downloader
+            elif platform == 'Twitter':
+                downloader = twitter_downloader
             else:
-                logger.info(f"Platform {platform} not implemented yet")
+                logger.warning(f"Unsupported platform: {platform}")
                 await update.message.reply_text(NOT_IMPLEMENTED_MESSAGE.format(platform))
+                return
+            try:
+                if command_type == "video":
+                    filepath = await downloader.download_video(url, request_id=request_id)
+                else:  # audio
+                    filepath, title = await downloader.download_audio(url, request_id=request_id)
+                # Проверяем файл
+                if not os.path.exists(filepath):
+                    raise DownloadError("Downloaded file not found")
+                # Отправляем файл
+                if command_type == "video":
+                    with redirect_stdout(None), redirect_stderr(None):  # Скрываем вывод ffmpeg
+                        with VideoFileClip(filepath) as clip:
+                            await update.message.reply_video(
+                                video=open(filepath, 'rb'),
+                                width=clip.w,
+                                height=clip.h,
+                                supports_streaming=True
+                            )
+                else:
+                    await update.message.reply_audio(
+                        audio=open(filepath, 'rb'),
+                        title=title,
+                        performer="from Twitter via Saver" if platform == 'Twitter' else "from YouTube via Saver"
+                    )
+
+                logger.info(f"Successfully sent {command_type} from {platform}")
+            except DownloadError as e:
+                logger.error(f"Download error for {url}: {str(e)}")
+                error_message = str(e)
+
+                if "too large" in error_message.lower():
+                    await update.message.reply_text(FILE_TOO_LARGE_MESSAGE)
+                else:
+                    await update.message.reply_text(DOWNLOAD_ERROR_MESSAGE)
+                logger.error(f"Download error: {e}")
+            except Exception as e:
+                logger.error(f"Error processing video: {e}")
+                await update.message.reply_text(TECHNICAL_ERROR_MESSAGE)
+            finally:
+                if 'filepath' in locals() and os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                        logger.debug(f"Temporary file removed: {filepath}")
+                    except Exception as e:
+                        logger.error(f"Error removing temporary file {filepath}: {e}")
 
         except Exception as e:
             logger.error(f"Unexpected error processing {command_type} command: {str(e)}", exc_info=True)
             await update.message.reply_text(TECHNICAL_ERROR_MESSAGE)
-
-        logger.info(f"Request completed for user {user_id}")
 
 
 async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
