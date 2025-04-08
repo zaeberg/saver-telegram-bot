@@ -1,0 +1,54 @@
+# Кэш интерпретатора
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Временные файлы
+*.log
+*.tmp
+*.swp
+*.bak
+.DS_Store
+Thumbs.db
+
+# virtualenv / venv
+venv/
+.env/
+ENV/
+env/
+
+# PyInstaller
+dist/
+build/
+*.spec
+
+# setuptools
+*.egg-info/
+*.egg/
+.eggs/
+
+# pytest
+.cache/
+.pytest_cache/
+
+# coverage
+htmlcov/
+.tox/
+.coverage
+coverage.xml
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+*.iml
+
+# dotenv-файлы
+.env
+
+# Ключи и токены
+*.key
+*.pem
+*.crt
+*.p12
