@@ -6,6 +6,7 @@ from utils.validate_url import validate_url
 from utils.logger import logger, request_context
 from utils.constants import (
     HELP_MESSAGE,
+    UNAVAILABLE_REELS,
     UNKNOWN_COMMAND_MESSAGE,
     MISSING_URL_MESSAGE,
     PROCESSING_START_MESSAGE,
@@ -25,9 +26,11 @@ from telegram.ext import (
 from utils.downloader_base import DownloadError
 from utils.downloader_youtube import YouTubeDownloader
 from utils.downloader_twitter import TwitterDownloader
+from utils.downloader_instagram import InstagramDownloader
 
 youtube_downloader = YouTubeDownloader()
 twitter_downloader = TwitterDownloader()
+instagram_downloader = InstagramDownloader()
 
 async def process_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE, command_type: str):
     with request_context() as request_id:
@@ -57,10 +60,13 @@ async def process_media_command(update: Update, context: ContextTypes.DEFAULT_TY
                 downloader = youtube_downloader
             elif platform == 'Twitter':
                 downloader = twitter_downloader
+            elif platform == 'Instagram':
+                downloader = instagram_downloader
             else:
                 logger.warning(f"Unsupported platform: {platform}")
                 await update.message.reply_text(NOT_IMPLEMENTED_MESSAGE.format(platform))
                 return
+
             try:
                 if command_type == "video":
                     filepath = await downloader.download_video(url, request_id=request_id)
@@ -88,13 +94,15 @@ async def process_media_command(update: Update, context: ContextTypes.DEFAULT_TY
 
                 logger.info(f"Successfully sent {command_type} from {platform}")
             except DownloadError as e:
-                logger.error(f"Download error for {url}: {str(e)}")
                 error_message = str(e)
 
-                if "too large" in error_message.lower():
+                if "requires Instagram login" in error_message:
+                    await update.message.reply_text(UNAVAILABLE_REELS)
+                elif "too large" in error_message.lower():
                     await update.message.reply_text(FILE_TOO_LARGE_MESSAGE)
                 else:
                     await update.message.reply_text(DOWNLOAD_ERROR_MESSAGE)
+
                 logger.error(f"Download error: {e}")
             except Exception as e:
                 logger.error(f"Error processing video: {e}")

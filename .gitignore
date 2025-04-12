@@ -1,4 +1,5 @@
 temp/
+cookies/
 
 # Кэш интерпретатора
 __pycache__/
