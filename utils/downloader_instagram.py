@@ -6,90 +6,94 @@ from utils.downloader_base import BaseDownloader, DownloadError
 class InstagramDownloader(BaseDownloader):
     def __init__(self):
         super().__init__()
-
+        # Базовые опции для Instagram
+        # TODO: в будущем можно добавить cookies/cookiefile для доступа к приватным рилсам
         self.base_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': True,
-            'no_color': True,
-            'ignoreerrors': True,
-            'extractor_args': {
-                'instagram': {
-                    'skip_download': False,
-                    'extract_metadata': False,
-                    'get_likes': False,
-                }
-            }
+            # 'cookiefile': 'instagram_cookies.txt'
         }
 
-
-    async def download_video(self, url: str, request_id: str = None) -> str:
+    async def download_video(self, url: str, request_id: str = None) -> Tuple[str, str]:
         with request_context(request_id) if request_id else nullcontext():
             try:
-                logger.info(f"Starting Instagram Reel download: {url}")
+                logger.info(f"Starting Instagram video download: {url}")
 
-                info = self._get_info(url)
+                # Получаем информацию для заголовка и ID
+                info = await self._get_info(url, {'extract_flat': True})
                 video_id = info['id']
-                title = info.get('title', 'Instagram Reel')
 
-                logger.info(f"Processing Reel: {title}")
+                # Instagram часто не имеет title, используем описание или ID
+                title = info.get('title') or info.get('description') or video_id
+                if len(title) > 100: # Обрезаем длинное описание
+                     title = title[:97] + "..."
 
-                # Настройки загрузки для Instagram
+                # Опции загрузчика
                 ydl_opts = {
                     **self.base_opts,
-                    'format': 'best[ext=mp4]',
-                    'outtmpl': str(self.temp_dir / '%(id)s.%(ext)s')
+                    # Лучшее качество MP4, не превышающее лимит
+                    'format': f'best[ext=mp4][filesize<{self.MAX_FILE_SIZE_BYTES}]/best[ext=mp4]',
+                    'outtmpl': '%(id)s.%(ext)s',
                 }
 
-                try:
-                    output_path = self._download_with_options(url, ydl_opts)
-                except Exception as e:
-                    if "Login required" in str(e):
-                        raise DownloadError("This Reel requires Instagram login (private content)")
-                    raise
+                logger.info("Attempting Instagram video download")
+                output_path = await self._download_with_options(url, ydl_opts)
+                size_mb = await self._check_file_size(output_path)
+                logger.info(f"Instagram video downloaded: {output_path} ({size_mb:.1f}MB)")
 
-                size_mb = self._check_file_size(output_path)
-                logger.info(f"Instagram Reel downloaded: {output_path} ({size_mb:.1f}MB)")
+                return output_path, title
 
-                return output_path
-
+            except DownloadError as e:
+                 # Проверяем специфичную ошибку Instagram о логине
+                 if "Login required" in str(e):
+                     logger.warning(f"Instagram login required for {url}")
+                     raise DownloadError("This content requires Instagram login (private or restricted).")
+                 raise e
             except Exception as e:
-                raise DownloadError(f"Instagram Reel download error: {str(e)}")
+                logger.error(f"Unexpected Instagram video download error: {e}", exc_info=True)
+                raise DownloadError(f"Instagram video download failed: {str(e)}")
+
 
     async def download_audio(self, url: str, request_id: str = None) -> Tuple[str, str]:
         with request_context(request_id) if request_id else nullcontext():
             try:
-                logger.info(f"Starting Instagram Reel audio extraction: {url}")
+                logger.info(f"Starting Instagram audio download: {url}")
 
-                # Получаем информацию о видео
-                info = self._get_info(url)
+                # Получаем информацию для заголовка и ID
+                info = await self._get_info(url, {'extract_flat': True})
                 video_id = info['id']
-                title = info.get('title', video_id)
 
-                # Настройки для извлечения аудио
+                # Instagram часто не имеет title, используем описание или ID
+                title = info.get('title') or info.get('description') or video_id
+                if len(title) > 100: # Обрезаем длинное описание
+                     title = title[:97] + "..."
+
+                # Опции загрузчика и настройки для извлечения аудио
                 ydl_opts = {
                     **self.base_opts,
                     'format': 'bestaudio/best',
-                    'outtmpl': {'default': str(self.temp_dir / '%(id)s.%(ext)s')},
+                    'outtmpl': f"{video_id}.%(ext)s",
                     'postprocessors': [{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
                         'preferredquality': '128',
                     }],
-                    'keepvideo': False,
+                    'keepvideo': False, # удаляем видео файл после извлечения аудио
                 }
 
-                try:
-                    output_path = self._download_with_options(url, ydl_opts)
-                except Exception as e:
-                    if "Login required" in str(e):
-                        raise DownloadError("This Reel requires Instagram login (private content)")
-                    raise
-
-                size_mb = self._check_file_size(output_path)
+                logger.info("Attempting Instagram audio download and extraction")
+                output_path = await self._download_with_options(url, ydl_opts)
+                size_mb = await self._check_file_size(output_path)
                 logger.info(f"Instagram audio extracted: {output_path} ({size_mb:.1f}MB)")
 
                 return output_path, title
 
+            except DownloadError as e:
+                # Проверяем специфичную ошибку Instagram о логине
+                 if "Login required" in str(e):
+                     logger.warning(f"Instagram login required for {url}")
+                     raise DownloadError("This content requires Instagram login (private or restricted).")
+                 raise e
             except Exception as e:
-                raise DownloadError(f"Instagram audio extraction error: {str(e)}")
+                logger.error(f"Unexpected Instagram audio extraction error: {e}", exc_info=True)
+                raise DownloadError(f"Instagram audio extraction failed: {str(e)}")

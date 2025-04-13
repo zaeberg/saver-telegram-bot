@@ -8,10 +8,9 @@ from utils.constants import (
     SUPPORTED_DOMAINS
 )
 
-# Validates URL and returns (is_valid, error_message, platform)
-# platform will be None if URL is invalid
+# Валидирует URL и возвращает (is_valid, error_message, platform)
+# platform будет None если URL не валиден
 def validate_url(url: str) -> Tuple[bool, str, Optional[str]]:
-    # Basic URL validation
     url_pattern = re.compile(
         r'^https?://'  # http:// or https://
         r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domain...

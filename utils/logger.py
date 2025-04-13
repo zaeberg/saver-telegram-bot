@@ -1,8 +1,7 @@
 import logging
 import uuid
-from typing import Optional
 from functools import wraps
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from contextvars import ContextVar
 
 # Контекстная переменная для хранения request_id
