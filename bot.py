@@ -13,21 +13,30 @@ from utils.constants import (
     NOT_IMPLEMENTED_MESSAGE,
     DOWNLOAD_ERROR_MESSAGE,
     TECHNICAL_ERROR_MESSAGE,
-    FILE_TOO_LARGE_MESSAGE
+    FILE_TOO_LARGE_MESSAGE,
+    START_AGAIN,
+    ACTION_CANCEL,
+    ACTION_EMPTY,
+    WAIT_FOR_LINK
 )
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters,
+    filters
 )
 from utils.downloader_base import DownloadError
 from utils.downloader_youtube import YouTubeDownloader
 from utils.downloader_twitter import TwitterDownloader
 from utils.downloader_instagram import InstagramDownloader
+
+# Константы для кнопок
+VIDEO_BUTTON_TEXT = "Видео 🎬"
+AUDIO_BUTTON_TEXT = "Аудио 🎵"
+CANCEL_BUTTON_TEXT = "Отмена 🚫"
 
 # Инициализация
 youtube_downloader = YouTubeDownloader()
@@ -41,8 +50,14 @@ async def download_worker(application: Application, queue: asyncio.Queue):
     logger.info("Download worker started")
 
     while True:
+        job = None
+        send_final_keyboard = False # Флаг, нужно ли отправлять основную клавиатуру
+        chat_id_for_final_keyboard = None
+
         try:
             job = await queue.get()
+            send_final_keyboard = True
+            chat_id_for_final_keyboard = job['chat_id']
 
             chat_id = job['chat_id']
             url = job['url']
@@ -54,6 +69,8 @@ async def download_worker(application: Application, queue: asyncio.Queue):
                 logger.info(f"Processing job: [{command_type}] for {url} from chat {chat_id}")
 
                 filepath = None
+                title = "Untitled"
+                success = False # Флаг успеха операции для сообщения
 
                 try:
                     # Подставляем правильный downloader
@@ -102,6 +119,7 @@ async def download_worker(application: Application, queue: asyncio.Queue):
                                     supports_streaming=True
                                 )
                                 logger.info(f"Successfully sent video to chat {chat_id} ({filepath})")
+                                success = True
                         except FileNotFoundError:
                             logger.error(f"File {filepath} not found before sending")
                             await application.bot.send_message(chat_id=chat_id, text=TECHNICAL_ERROR_MESSAGE)
@@ -120,6 +138,7 @@ async def download_worker(application: Application, queue: asyncio.Queue):
                                     performer=f"from {platform}"
                                 )
                                 logger.info(f"Successfully sent audio to chat {chat_id} ({filepath})")
+                                success = True
                         except FileNotFoundError:
                             logger.error(f"File {filepath} not found before sending")
                             await application.bot.send_message(chat_id=chat_id, text=TECHNICAL_ERROR_MESSAGE)
@@ -165,92 +184,177 @@ async def download_worker(application: Application, queue: asyncio.Queue):
                     if filepath:
                         try:
                             exists = await loop.run_in_executor(None, os.path.exists, filepath)
-                            if exists:
-                                await loop.run_in_executor(None, os.remove, filepath)
+                            if exists: await loop.run_in_executor(None, os.remove, filepath)
                         except Exception as e:
                             logger.error(f"Error removing temporary file {filepath}: {e}")
 
-                    # Сигнал воркееру что задача обработана
-                    queue.task_done()
+                    # Говорим воркееру что задача обработана
+                    if job:
+                        queue.task_done()
+                        logger.info(f"[{request_id}] Job task done.")
+                    else:
+                        logger.warning("Job was None in finally block, task_done() not called.")
 
         except asyncio.CancelledError:
             logger.info("Download worker task cancelled.")
+            send_final_keyboard = False
             break
 
         except Exception as e:
             logger.critical(f"Critical error IN download worker MAIN loop: {e}", exc_info=True)
-            await asyncio.sleep(5)
+            send_final_keyboard = False
+            # ВАЖНО: Попытаться разблокировать очередь, если ошибка произошла ПОСЛЕ get(), но ДО task_done()
+            # Проверяем, что job есть и очередь не пуста
+            if job and not queue.empty():
+                 try:
+                     logger.warning("Attempting task_done() after critical worker loop error to prevent queue lock.")
+                     queue.task_done()
+                 except ValueError:
+                     pass
+                 except Exception as td_err:
+                     logger.error(f"Failed to call task_done() after critical error: {td_err}")
+            await asyncio.sleep(5) # Пауза перед следующей итерацией
+        finally:
+            # Показываем клавиатуру
+            if send_final_keyboard and chat_id_for_final_keyboard:
+                try:
+                    await send_main_keyboard(application, chat_id_for_final_keyboard, "Готово")
+                except Exception as final_kb_err:
+                    logger.error(f"Failed to send final main keyboard to {chat_id_for_final_keyboard}: {final_kb_err}")
 
-# Принимает запрос, валидирует URL и ставит задачу в очередь
-async def process_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE, command_type: str):
-    request_id = context.request_id
-    user_id = update.effective_user.id
-    username = update.effective_user.username or f"ID:{user_id}"
-    chat_id = update.message.chat_id
+            # Сбрасываем флаги для следующей итерации
+            send_final_keyboard = False
+            chat_id_for_final_keyboard = None
 
-    # Проверка на наличие аргументов, нужен 1 урл
-    if not context.args or len(context.args) != 1:
-        logger.warning(f"Missing URL in {command_type} command from user {username}")
-        await update.message.reply_text(MISSING_URL_MESSAGE.format(f"/{command_type}"))
-        return
 
-    url = context.args[0]
-    logger.info(f"Received {command_type} request for {url} from user {username}")
+# Создает разметку основной клавиатуры.
+def get_main_keyboard_markup() -> ReplyKeyboardMarkup:
+    keyboard = [[KeyboardButton(VIDEO_BUTTON_TEXT), KeyboardButton(AUDIO_BUTTON_TEXT)]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
-    # Валидация URL и платформы
-    is_valid, error_message, platform = validate_url(url)
-    if not is_valid:
-        logger.warning(f"Invalid URL: {url} from user {username}. Reason: {error_message}")
-        await update.message.reply_text(error_message)
-        return
+# Создает разметку клавиатуры отмены
+def get_cancel_keyboard_markup() -> ReplyKeyboardMarkup:
+    keyboard = [[KeyboardButton(CANCEL_BUTTON_TEXT)]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
-    if platform not in ['YouTube', 'Twitter', 'Instagram']:
-        logger.warning(f"Unsupported platform: {platform} from URL: {url}")
-        await update.message.reply_text(NOT_IMPLEMENTED_MESSAGE.format(platform))
-        return
+# Отправляет сообщение с основной клавиатурой
+async def send_main_keyboard(app_or_update, chat_id: int, text: str):
+    markup = get_main_keyboard_markup()
+    if isinstance(app_or_update, Application):
+        await app_or_update.bot.send_message(chat_id, text, reply_markup=markup)
+    else: # Это Update
+        await app_or_update.message.reply_text(text, reply_markup=markup)
 
-    # Получаем очередь из bot_data
-    try:
-        download_queue = context.bot_data['download_queue']
-    except KeyError:
-        logger.critical(f"[{request_id}] Download queue not found in bot_data")
-        await update.message.reply_text(TECHNICAL_ERROR_MESSAGE)
-        return
+# Отправляет сообщение с клавиатурой отмены
+async def send_cancel_keyboard(update: Update, text: str):
+    markup = get_cancel_keyboard_markup()
+    await update.message.reply_text(text, reply_markup=markup)
 
-    # Сообщение пользователю о добавлении в очередь
-    await update.message.reply_text(QUEUE_MESSAGE)
-
-    # Создаем задачу для воркера
-    job = {
-        'chat_id': chat_id,
-        'url': url,
-        'type': command_type,
-        'platform': platform,
-        'request_id': request_id
-    }
-
-    # Помещаем задачу в очередь
-    await download_queue.put(job)
-
-async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with request_context() as request_id:
-        context.request_id = request_id
-        await process_media_command(update, context, "video")
-
-async def audio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-   with request_context() as request_id:
-       context.request_id = request_id
-       await process_media_command(update, context, "audio")
-
+# Обработчики
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP_MESSAGE)
+    context.user_data.pop('next_action', None) # Сбрасываем состояние
+    await send_main_keyboard(update, update.message.chat_id, HELP_MESSAGE)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP_MESSAGE)
+    context.user_data.pop('next_action', None)
+    await send_main_keyboard(update, update.message.chat_id, HELP_MESSAGE)
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Received unknown command: {update.message.text} from user {update.effective_user.username or update.effective_user.id}")
-    await update.message.reply_text(UNKNOWN_COMMAND_MESSAGE)
+    # Не проверяем state, так как handle_link должен был обработать ссылку
+    logger.info(f"Unknown command: {update.message.text} from {update.effective_user.id}")
+    await send_main_keyboard(update, update.message.chat_id, UNKNOWN_COMMAND_MESSAGE)
+
+# Обрабатывает команду /cancel и показывает основную клавиатуру.
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    action = context.user_data.pop('next_action', None)
+    log_msg = f"User {update.effective_user.id} used /cancel"
+    reply_text = "Выберите действие:"
+    if action:
+        log_msg += f" to cancel action '{action}'"
+        reply_text = f"Действие '{action}' отменено."
+    logger.info(log_msg)
+    await send_main_keyboard(update, update.message.chat_id, reply_text)
+
+# Обработчики текста кнопок
+async def handle_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pressed_button_text = update.message.text
+    user_id = update.effective_user.id
+    chat_id = update.message.chat_id
+
+    if pressed_button_text == VIDEO_BUTTON_TEXT:
+        context.user_data['next_action'] = 'video'
+        await send_cancel_keyboard(update, WAIT_FOR_LINK)
+
+    elif pressed_button_text == AUDIO_BUTTON_TEXT:
+        context.user_data['next_action'] = 'audio'
+        await send_cancel_keyboard(update, WAIT_FOR_LINK)
+
+    elif pressed_button_text == CANCEL_BUTTON_TEXT:
+        action = context.user_data.pop('next_action', None)
+        reply_text = "Действие отменено." if action else "Нет активного действия для отмены."
+        await send_main_keyboard(update, chat_id, reply_text)
+
+    else:
+        # Если это не текст кнопки, передаем управление дальше
+        # Важно: Этот обработчик должен стоять ПЕРЕД handle_link
+        logger.debug(f"Text '{pressed_button_text}' is not a button press.")
+        await handle_link(update, context) # Передаем управление обработчику ссылок
+
+# Обработчик для ссылок после нажатия кнопки
+# Обрабатывает текстовое сообщение, если ожидается ссылка.
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    expected_action = context.user_data.get('next_action')
+
+    # Если не ждем ссылку и это не команда - можно считать неизвестным текстом
+    # Иначе это может быть неизвестная команда, ее обработает unknown_command
+    if not expected_action:
+        if not update.message.text.startswith('/'):
+            await send_main_keyboard(update, update.message.chat_id, UNKNOWN_COMMAND_MESSAGE)
+            return
+
+    url = update.message.text
+    chat_id = update.message.chat_id
+    username = update.effective_user.username or f"ID:{update.effective_user.id}"
+
+    with request_context() as request_id:
+        logger.info(f"[{request_id}] Received potential link '{url}' from user {username} expecting action '{expected_action}'")
+
+        # Валидация урла и платформы
+        is_valid, error_message, platform = validate_url(url)
+        if not is_valid:
+            logger.warning(f"[{request_id}] Invalid URL received via state: {url}. Reason: {error_message}")
+            # Просим ссылку или отмену
+            await update.message.reply_text(f"{error_message}\n\nПожалуйста, отправь корректную ссылку или нажмите '{CANCEL_BUTTON_TEXT}'.")
+            return
+
+        supported_platforms = ['YouTube', 'Twitter', 'Instagram']
+        if platform not in supported_platforms:
+            logger.warning(f"[{request_id}] Unsupported platform received via state: {platform} from URL: {url}")
+            # Не сбрасываем состояние, просим ссылку еще раз
+            await update.message.reply_text(NOT_IMPLEMENTED_MESSAGE.format(platform or 'Unknown') + f"\n\nПожалуйста, отправь ссылку с поддерживаемой платформы для скачивания {expected_action}.")
+            return
+
+        # Получаем очередь
+        try:
+            download_queue = context.bot_data['download_queue']
+        except KeyError:
+            logger.critical(f"[{request_id}] Download queue not found in bot_data!")
+            await update.message.reply_text(TECHNICAL_ERROR_MESSAGE)
+            # Сбрасываем состояние при критической ошибке
+            context.user_data.pop('next_action', None)
+            await send_main_keyboard(update, chat_id, "Произошла ошибка.")
+            return
+
+        # Ставим задачу в очередь
+        await send_main_keyboard(update, update.message.chat_id, QUEUE_MESSAGE)
+        job = {
+            'chat_id': chat_id,
+            'url': url,
+            'type': expected_action,
+            'platform': platform,
+            'request_id': request_id
+        }
+        await download_queue.put(job)
 
 # Запускает бота и воркер.
 async def main():
@@ -269,11 +373,22 @@ async def main():
         # Передаем app в воркер, чтобы он мог использовать app.bot
         worker_task = asyncio.create_task(download_worker(app, download_queue))
 
-        # Обработчики команд
+        # Обработчики команд (порядок важен)
         app.add_handler(CommandHandler('start', start))
         app.add_handler(CommandHandler('help', help_command))
-        app.add_handler(CommandHandler('video', video_command))
-        app.add_handler(CommandHandler('audio', audio_command))
+        app.add_handler(CommandHandler('cancel', cancel_command))
+
+        # обработчик кнопок
+        # Он должен идти ПЕРЕД обработчиком ссылок/любого текста
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.Regex(
+                f'^({VIDEO_BUTTON_TEXT}|{AUDIO_BUTTON_TEXT}|{CANCEL_BUTTON_TEXT})$'
+            ),
+            handle_button_press
+        ))
+
+        # Обработчик ссылок (и любого другого текста, не являющегося кнопкой или командой)
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
 
         # Обработчик для неизвестных команд
         app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
