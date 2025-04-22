@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем код вашего бота в рабочую директорию /app
 # Теперь код будет лежать в /app/saver-telegram-bot/
-COPY saver-telegram-bot/ ./saver-telegram-bot/
+COPY ./ ./saver-telegram-bot/
 
 # Создаем директорию temp, если ее нет (хотя BaseDownloader ее создает)
 # и даем права, если будем использовать не-root пользователя (хорошая практика)
